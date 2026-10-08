@@ -11,7 +11,11 @@ import {
   Position,
   TextDocument,
 } from "vscode";
-import { DocumentSymbol, TextEdit } from "vscode-languageserver-types";
+import {
+  DocumentSymbol,
+  Range as LspRange,
+  TextEdit,
+} from "vscode-languageserver-types";
 
 import { LanguageClient as NodeLanguageClient } from "vscode-languageclient/node";
 import { LanguageClient as BrowserLanguageClient } from "vscode-languageclient/browser";
@@ -23,6 +27,16 @@ import { WebviewManager } from "../webviewManager";
  * The edit uses LSP positions in the document the diagnostic belongs to.
  */
 export type MessageSegment = { text: string; edit?: TextEdit };
+
+/**
+ * The message of a diagnostic, split into segments. Matched to a published diagnostic by its
+ * range and message.
+ */
+export type SegmentedDiagnostic = {
+  range: LspRange;
+  message: string;
+  segments: MessageSegment[];
+};
 
 export interface TimeoutDisposable extends Disposable {
   dispose(timeout?: number): Promise<void>;

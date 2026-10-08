@@ -59,7 +59,9 @@ number // Position of the cursor (offset based) after mapping
 #### Description
 Message that contains the diagnostics in the current document which the extension received from the LSP server. Send to the editor upon receiving from the LSP server.
 
-Diagnostics may already include message segments carried over from the previous message; further segments are streamed in afterwards with `diagnosticSegmentsResolved` messages, which refer to this message through its `version`.
+A diagnostic may have its message split into `segments`, some of which are suggestions: a segment with an `edit` is shown as a link inside the message that applies the edit when clicked. Concatenating the segment texts gives the diagnostic's message. Segments are resolved by language clients that support them; the Lean client takes them from the "Try this" widgets in the interactive diagnostics (`Lean.Widget.getInteractiveDiagnostics`), which requires the server to be started with `hasWidgets: true`.
+
+The diagnostics are sent as soon as they are published, with the segments carried over from the previous message where their edits still apply, and sent again once the segments have been resolved. The editor only offers suggestions while its document `version` equals the one the diagnostics were computed for. Each edit also carries the `oldText` it replaces, and the editor refuses to apply an edit whose `oldText` no longer matches the document, or that touches a part of the document the user cannot edit.
 
 #### Body
 ```ts
@@ -246,23 +248,4 @@ Sent from the extension to the editor to enable/disable teacher mode in the edit
 #### Body
 ```ts
 boolean // Flag indicating whether teacher mode should be turned on or off
-```
-
-### `diagnosticSegmentsResolved`
-#### Description
-Sent by the extension to the editor to patch in message segments for diagnostics after they have been resolved. A segment is a piece of the diagnostic message; a segment with an `edit` is a suggestion, which the editor shows as a link inside the message that applies the edit when clicked. Concatenating the segment texts gives the diagnostic's message.
-
-Segments are only resolved by language clients that opt in, for diagnostics inside input areas. The Lean client takes them from the "Try this" widgets in the interactive diagnostics (`Lean.Widget.getInteractiveDiagnostics`), which requires the server to be started with `hasWidgets: true`. All segments of one diagnostics message are sent in a single `diagnosticSegmentsResolved` message. An empty `segments` array removes segments that were carried over from the previous `diagnostics` message.
-
-Each `index` refers to the position of the diagnostic within the `diagnostics` message for the given `version`; the editor discards patches for a version that is no longer active. Each edit carries the `oldText` it replaces, and the editor refuses to apply an edit whose `oldText` no longer matches the document. Suggestions whose edit reaches outside the input area are sent as plain text.
-
-#### Body
-```ts
-{
-    version: number,                  // Document version the patched diagnostics belong to
-    patches: Array<{
-        index: number,                    // Index of the diagnostic (within the last `diagnostics` message for this version) to patch
-        segments: OffsetMessageSegment[]  // The message segments for that diagnostic (may be empty)
-    }>
-}
 ```

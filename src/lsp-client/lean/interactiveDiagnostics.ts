@@ -4,7 +4,7 @@ import type {
   TaggedText,
 } from "@leanprover/infoview-api";
 import type { Range as LspRange, TextEdit } from "vscode-languageserver-types";
-import type { MessageSegment } from "../clientTypes";
+import type { MessageSegment, SegmentedDiagnostic } from "../clientTypes";
 
 /**
  * Ids of the Lean widgets that render a clickable "Try this" suggestion inside a message.
@@ -12,22 +12,10 @@ import type { MessageSegment } from "../clientTypes";
  * `textInsertionWidget` with the suggestion text as link text. Both carry the edit in their
  * props as `{ range, suggestion }`.
  */
-export const SUGGESTION_WIDGET_IDS: readonly string[] = [
+const SUGGESTION_WIDGET_IDS: readonly string[] = [
   "Lean.Meta.Hint.textInsertionWidget",
   "Lean.Meta.Hint.tryThisDiffWidget",
 ];
-
-export type { MessageSegment };
-
-/** A diagnostic that contains at least one suggestion, split into message segments. */
-export interface SuggestionDiagnostic {
-  range: LspRange;
-  fullRange?: LspRange;
-  severity?: number;
-  /** The flattened message; equal to the message of the matching published diagnostic. */
-  message: string;
-  segments: MessageSegment[];
-}
 
 type Embed = MsgEmbed | { [key: string]: unknown };
 
@@ -112,18 +100,19 @@ export function toSegments(t: TaggedText<MsgEmbed>): MessageSegment[] {
   return segments;
 }
 
-/** Converts interactive diagnostics to suggestion diagnostics, skipping those without suggestions. */
-export function toSuggestionDiagnostics(
+/**
+ * Splits the messages of interactive diagnostics into segments, skipping diagnostics without
+ * suggestions. The message is flattened, so it equals that of the matching published diagnostic.
+ */
+export function toSegmentedDiagnostics(
   diagnostics: InteractiveDiagnostic[],
-): SuggestionDiagnostic[] {
-  const result: SuggestionDiagnostic[] = [];
+): SegmentedDiagnostic[] {
+  const result: SegmentedDiagnostic[] = [];
   for (const d of diagnostics) {
     const segments = toSegments(d.message);
     if (!segments.some((s) => s.edit)) continue;
     result.push({
       range: d.range,
-      fullRange: d.fullRange,
-      severity: d.severity,
       message: segments.map((s) => s.text).join(""),
       segments,
     });

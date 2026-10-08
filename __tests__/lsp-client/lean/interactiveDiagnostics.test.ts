@@ -9,7 +9,7 @@ import {
   collectRpcRefs,
   flattenMessage,
   toSegments,
-  toSuggestionDiagnostics,
+  toSegmentedDiagnostics,
 } from "../../../src/lsp-client/lean/interactiveDiagnostics";
 
 // Recorded from a Lean v4.31.0 server started with `hasWidgets: true`, for a file with two
@@ -170,9 +170,9 @@ describe("toSegments", () => {
   });
 });
 
-describe("toSuggestionDiagnostics", () => {
+describe("toSegmentedDiagnostics", () => {
   it("keeps only the recorded help diagnostics, not the linter warnings on the same range", () => {
-    const result = toSuggestionDiagnostics(fixture.interactive);
+    const result = toSegmentedDiagnostics(fixture.interactive);
 
     expect(result.map((d) => d.range)).toEqual([
       range(3, 2, 8),

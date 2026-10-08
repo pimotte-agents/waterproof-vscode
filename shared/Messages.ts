@@ -5,7 +5,6 @@ import {
   HistoryChange,
   ThemeStyle,
   OffsetDiagnostic,
-  OffsetMessageSegment,
 } from "@impermeable/waterproof-editor";
 import { RocqGoalAnswer, HypVisibility, PpString } from "../lib/types";
 import { Completion } from "@impermeable/waterproof-editor";
@@ -77,14 +76,7 @@ export type Message =
   | MessageBase<MessageType.viewportHint, { start: number; end: number }>
   // The payload is forwarded to an InfoView instance, so its type does not concern us
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  | MessageBase<MessageType.infoviewRpc, { payload: any }>
-  | MessageBase<
-      MessageType.diagnosticSegmentsResolved,
-      {
-        version: number;
-        patches: Array<{ index: number; segments: OffsetMessageSegment[] }>;
-      }
-    >;
+  | MessageBase<MessageType.infoviewRpc, { payload: any }>;
 
 /**
  * Message type enum. Every message that is send from the
@@ -121,5 +113,4 @@ export const enum MessageType {
   themeUpdate,
   viewportHint,
   infoviewRpc,
-  diagnosticSegmentsResolved,
 }
