@@ -10,12 +10,10 @@ import {
   OutputChannel,
   Diagnostic,
   DiagnosticSeverity,
+  CancellationToken,
   workspace,
 } from "vscode";
-import {
-  CodeAction,
-  VersionedTextDocumentIdentifier,
-} from "vscode-languageserver-types";
+import { VersionedTextDocumentIdentifier } from "vscode-languageserver-types";
 import { FileProgressParams } from "../requestTypes";
 import {
   LeanDiagnostic,
@@ -29,7 +27,11 @@ import {
   WaterproofLogger as wpl,
   WaterproofSetting,
 } from "../../helpers";
-import { LanguageClientProvider, WpDiagnostic } from "../clientTypes";
+import {
+  LanguageClientProvider,
+  MessageSegment,
+  WpDiagnostic,
+} from "../clientTypes";
 import { WebviewManager } from "../../webviewManager";
 import { findOccurrences } from "../qedStatus";
 import { InputAreaStatus } from "@impermeable/waterproof-editor";
@@ -40,6 +42,29 @@ import {
 } from "vscode-languageclient";
 import { FileProgressKind, MessageType } from "../../../shared";
 import { patchDiagnosticConverters } from "./converter";
+import type {
+  InteractiveDiagnostic,
+  RpcCallParams,
+  RpcConnected,
+  RpcConnectParams,
+  RpcKeepAliveParams,
+} from "@leanprover/infoview-api";
+import {
+  collectRpcRefs,
+  SuggestionDiagnostic,
+  toSuggestionDiagnostics,
+} from "./interactiveDiagnostics";
+
+// Values of `RpcErrorCode` from `@leanprover/infoview-api`, which only exports it as a runtime enum.
+const RPC_CONTENT_MODIFIED = -32801;
+const RPC_NEEDS_RECONNECT = -32900;
+const RPC_KEEP_ALIVE_PERIOD_MS = 10000;
+
+/** An RPC session with the Lean server for one document, kept alive until disposed. */
+interface RpcSession {
+  sessionId: string;
+  keepAlive: ReturnType<typeof setInterval>;
+}
 
 export class LeanLspClient extends LspClient<LeanGoalRequest, LeanGoalAnswer> {
   language = "lean4";
@@ -434,25 +459,48 @@ export class LeanLspClient extends LspClient<LeanGoalRequest, LeanGoalAnswer> {
     return status;
   }
 
-  protected override readonly requestsCodeActions = true;
+  // "Try this" suggestions are taken from the interactive diagnostics instead of code
+  // actions: they are embedded in the message they belong to, so they can be shown in place.
+  protected override readonly requestsMessageSegments = true;
 
-  /**
-   * Providers whose suggestions are safe to display inside student input areas.
-   */
-  private static readonly ALLOWED_CODE_ACTION_PROVIDERS: RegExp[] = [
-    // matches "_private.Lean.Meta.Tactic.TryThis.0.Lean.Meta.Tactic.TryThis.tryThisProvider"
-    // which is used by the `help` tactic
-    /tryThisProvider$/,
-  ];
-
-  protected override isAllowedCodeAction(result: CodeAction): boolean {
-    const providerName = result.data?.providerName;
-    if (providerName === undefined) {
-      return false;
+  protected override async resolveMessageSegments(
+    document: TextDocument,
+    diagnostics: readonly Diagnostic[],
+    indices: readonly number[],
+    token: CancellationToken,
+  ): Promise<Map<number, MessageSegment[]> | undefined> {
+    if (indices.length === 0) return new Map();
+    // Only request the lines we have diagnostics for, so that the request doesn't wait for
+    // the server to process the rest of the file.
+    const end = Math.max(...indices.map((i) => diagnostics[i].range.end.line));
+    const result = await this.requestSuggestionDiagnostics(document, {
+      start: 0,
+      end: end + 1,
+    });
+    if (
+      !result ||
+      token.isCancellationRequested ||
+      result.version !== document.version
+    ) {
+      return undefined;
     }
-    return LeanLspClient.ALLOWED_CODE_ACTION_PROVIDERS.some((re) =>
-      re.test(providerName),
-    );
+
+    // An interactive diagnostic belongs to a published one when both the range and the
+    // (flattened) message match. Diagnostics we rewrote (see `rewriteDiagnostics`) don't match.
+    const segments = new Map<number, MessageSegment[]>();
+    for (const index of indices) {
+      const d = diagnostics[index];
+      const match = result.diagnostics.find(
+        (s) =>
+          s.message === d.message &&
+          s.range.start.line === d.range.start.line &&
+          s.range.start.character === d.range.start.character &&
+          s.range.end.line === d.range.end.line &&
+          s.range.end.character === d.range.end.character,
+      );
+      if (match) segments.set(index, match.segments);
+    }
+    return segments;
   }
 
   /**
@@ -495,6 +543,121 @@ export class LeanLspClient extends LspClient<LeanGoalRequest, LeanGoalAnswer> {
       : document.positionAt(bestStart + bestLength);
   }
 
+  /** RPC sessions used for `getInteractiveDiagnostics`, by document URI. */
+  private rpcSessions = new Map<string, Promise<RpcSession>>();
+
+  /**
+   * Requests the interactive diagnostics of `document` and returns those that contain
+   * "Try this" suggestions, split into message segments. This needs the server to be started
+   * with `hasWidgets: true`, otherwise the suggestion widgets are stripped from the messages.
+   *
+   * @param lineRange The lines to request diagnostics for (end exclusive). The request blocks
+   *   until the server has processed these lines, so callers that react to published
+   *   diagnostics should pass the lines covered by those diagnostics.
+   * @returns The suggestion diagnostics and the document version they were requested for, or
+   *   `undefined` if the document changed while the request was in flight.
+   */
+  public async requestSuggestionDiagnostics(
+    document: TextDocument,
+    lineRange: { start: number; end: number } = {
+      start: 0,
+      end: document.lineCount,
+    },
+  ): Promise<
+    { version: number; diagnostics: SuggestionDiagnostic[] } | undefined
+  > {
+    const uri = document.uri.toString();
+    const version = document.version;
+    let interactive: InteractiveDiagnostic[];
+    try {
+      interactive = await this.callGetInteractiveDiagnostics(uri, lineRange);
+    } catch (e) {
+      if (rpcErrorCode(e) === RPC_CONTENT_MODIFIED) return undefined;
+      throw e;
+    }
+    const diagnostics = toSuggestionDiagnostics(interactive);
+    wpl.debug(
+      `[leanClient] interactive diagnostics uri=${uri.split("/").pop()}, version=${version}, ` +
+        `count=${interactive.length}, withSuggestions=${diagnostics.length}, ` +
+        `suggestions=${JSON.stringify(diagnostics.flatMap((d) => d.segments.filter((s) => s.edit).map((s) => s.text)))}`,
+    );
+    return { version, diagnostics };
+  }
+
+  private async callGetInteractiveDiagnostics(
+    uri: string,
+    lineRange: { start: number; end: number },
+    retry = true,
+  ): Promise<InteractiveDiagnostic[]> {
+    const { sessionId } = await this.getRpcSession(uri);
+    const params: RpcCallParams = {
+      textDocument: { uri },
+      position: { line: 0, character: 0 },
+      sessionId,
+      method: "Lean.Widget.getInteractiveDiagnostics",
+      params: { lineRange },
+    };
+    let result: InteractiveDiagnostic[];
+    try {
+      result = await this.client.sendRequest("$/lean/rpc/call", params);
+    } catch (e) {
+      // The server drops sessions, e.g. when the file worker restarts.
+      if (retry && rpcErrorCode(e) === RPC_NEEDS_RECONNECT) {
+        this.closeRpcSession(uri);
+        return this.callGetInteractiveDiagnostics(uri, lineRange, false);
+      }
+      throw e;
+    }
+    this.releaseRpcRefs(uri, sessionId, result);
+    return result;
+  }
+
+  /** Releases the RPC references in `result`, which we never dereference. */
+  private releaseRpcRefs(uri: string, sessionId: string, result: unknown) {
+    const refs = collectRpcRefs(result);
+    if (refs.length === 0) return;
+    this.client
+      .sendNotification("$/lean/rpc/release", { uri, sessionId, refs })
+      .catch((e: unknown) =>
+        wpl.debug(`[leanClient] failed to release RPC refs: ${e}`),
+      );
+  }
+
+  private getRpcSession(uri: string): Promise<RpcSession> {
+    let session = this.rpcSessions.get(uri);
+    if (!session) {
+      session = this.connectRpcSession(uri);
+      this.rpcSessions.set(uri, session);
+      // Don't cache a failed connection attempt.
+      session.catch(() => {
+        if (this.rpcSessions.get(uri) === session) this.rpcSessions.delete(uri);
+      });
+    }
+    return session;
+  }
+
+  private async connectRpcSession(uri: string): Promise<RpcSession> {
+    const connectParams: RpcConnectParams = { uri };
+    const { sessionId }: RpcConnected = await this.client.sendRequest(
+      "$/lean/rpc/connect",
+      connectParams,
+    );
+    const keepAlive = setInterval(() => {
+      const params: RpcKeepAliveParams = { uri, sessionId };
+      this.client
+        .sendNotification("$/lean/rpc/keepAlive", params)
+        .catch(() => this.closeRpcSession(uri));
+    }, RPC_KEEP_ALIVE_PERIOD_MS);
+    return { sessionId, keepAlive };
+  }
+
+  private closeRpcSession(uri: string) {
+    const session = this.rpcSessions.get(uri);
+    if (!session) return;
+    this.rpcSessions.delete(uri);
+    session.then((s) => clearInterval(s.keepAlive)).catch(() => {});
+  }
+
   // Emitters for infoview
   private didChangeEmitter = new EventEmitter<DidChangeTextDocumentParams>();
   public didChange(
@@ -532,10 +695,19 @@ export class LeanLspClient extends LspClient<LeanGoalRequest, LeanGoalAnswer> {
   public clientStopped = this.clientStoppedEmitter.event;
 
   async dispose(timeout?: number): Promise<void> {
+    for (const uri of [...this.rpcSessions.keys()]) this.closeRpcSession(uri);
     await super.dispose(timeout);
     this.clientStoppedEmitter.fire({
       message: "Lean server has stopped",
       reason: "",
     });
   }
+}
+
+function rpcErrorCode(e: unknown): number | undefined {
+  if (e !== null && typeof e === "object" && "code" in e) {
+    const code = (e as { code: unknown }).code;
+    return typeof code === "number" ? code : undefined;
+  }
+  return undefined;
 }

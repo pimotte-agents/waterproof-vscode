@@ -6,6 +6,7 @@ import {
   ThemeStyle,
   OffsetDiagnostic,
   OffsetCodeAction,
+  OffsetMessageSegment,
 } from "@impermeable/waterproof-editor";
 import { RocqGoalAnswer, HypVisibility, PpString } from "../lib/types";
 import { Completion } from "@impermeable/waterproof-editor";
@@ -81,6 +82,13 @@ export type Message =
   | MessageBase<
       MessageType.codeActionsResolved,
       { version: number; index: number; codeActions: OffsetCodeAction[] }
+    >
+  | MessageBase<
+      MessageType.diagnosticSegmentsResolved,
+      {
+        version: number;
+        patches: Array<{ index: number; segments: OffsetMessageSegment[] }>;
+      }
     >;
 
 /**
@@ -119,4 +127,5 @@ export const enum MessageType {
   viewportHint,
   infoviewRpc,
   codeActionsResolved,
+  diagnosticSegmentsResolved,
 }

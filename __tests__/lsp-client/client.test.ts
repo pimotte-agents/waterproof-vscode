@@ -159,7 +159,10 @@ import {
   Diagnostic,
   languages,
 } from "vscode";
-import { LanguageClientProvider } from "../../src/lsp-client/clientTypes";
+import {
+  LanguageClientProvider,
+  MessageSegment,
+} from "../../src/lsp-client/clientTypes";
 import { LspClient } from "../../src/lsp-client/client";
 import { WebviewManager } from "../../src/webviewManager";
 import { MessageType } from "../../shared";
@@ -244,7 +247,7 @@ const MULTI_AREA_DOCUMENT = {
  */
 class TestLspClient extends LspClient<GoalRequest, GoalAnswer> {
   readonly language = "test-lang";
-  protected override readonly requestsCodeActions = true;
+  protected override readonly requestsCodeActions: boolean = true;
 
   protected isAllowedCodeAction(result: CodeAction): boolean {
     return result.kind === "quickfix";
@@ -1712,5 +1715,255 @@ describe("LspClient.processDiagnostics code actions", () => {
       diagnosticsMessages(instance)[1].body.positionedDiagnostics[0]
         .codeActions,
     ).toEqual([expect.objectContaining({ title: "Fix" })]);
+  });
+});
+
+describe("LspClient.processDiagnostics message segments", () => {
+  const getDiagnostics =
+    languages.getDiagnostics as unknown as jest.MockedFunction<
+      (uri: Uri) => Diagnostic[]
+    >;
+
+  /** A test client that resolves message segments instead of code actions. */
+  class SegmentTestClient extends TestLspClient {
+    protected override readonly requestsCodeActions = false;
+    protected override readonly requestsMessageSegments = true;
+    resolveSegments = jest.fn<
+      Promise<Map<number, MessageSegment[]> | undefined>,
+      [TextDocument, readonly Diagnostic[], readonly number[]]
+    >(async () => new Map());
+
+    protected override resolveMessageSegments(
+      document: TextDocument,
+      diagnostics: readonly Diagnostic[],
+      indices: readonly number[],
+    ) {
+      return this.resolveSegments(document, diagnostics, indices);
+    }
+  }
+
+  function makeSegmentClient(document: TextDocument = FAKE_DOCUMENT) {
+    const instance = new SegmentTestClient(
+      jest.fn(() => makeClientDouble()) as unknown as LanguageClientProvider,
+      { appendLine: jest.fn() } as unknown as OutputChannel,
+    );
+    instance.activeDocument = document;
+    instance.webviewManager = {
+      postMessage: jest.fn(),
+      postAndCacheMessage: jest.fn(),
+      cacheMessage: jest.fn(),
+      has: jest.fn(() => true),
+    } as unknown as WebviewManager;
+    return instance;
+  }
+
+  // "ne o" on line 1 ("line one", offsets 9..17) of FAKE_DOCUMENT, inside its input area.
+  const helpDiagnostic = (): Diagnostic =>
+    ({
+      message: "Help\n  • We apply h",
+      severity: DiagnosticSeverity.Information,
+      range: new Range(new Position(1, 2), new Position(1, 6)),
+    }) as Diagnostic;
+
+  const lspRange = (sl: number, sc: number, el: number, ec: number) => ({
+    start: { line: sl, character: sc },
+    end: { line: el, character: ec },
+  });
+
+  /** Segments whose suggestion replaces `range` by "We apply h". */
+  const segmentsFor = (range = lspRange(1, 0, 1, 8)): MessageSegment[] => [
+    { text: "Help\n  • " },
+    { text: "We apply h", edit: { range, newText: "We apply h" } },
+  ];
+
+  const processDiagnostics = (instance: TestLspClient) =>
+    // @ts-expect-error protected
+    instance.processDiagnostics();
+
+  const segmentPatches = (instance: TestLspClient) =>
+    (instance.webviewManager?.postMessage as jest.Mock).mock.calls
+      .map(([, message]) => message)
+      .filter((m) => m.type === MessageType.diagnosticSegmentsResolved);
+
+  const diagnosticsMessages = (instance: TestLspClient) =>
+    (instance.webviewManager?.postAndCacheMessage as jest.Mock).mock.calls
+      .map(([, message]) => message)
+      .filter((m) => m.type === MessageType.diagnostics);
+
+  const cachedMessages = (instance: TestLspClient) =>
+    (instance.webviewManager?.cacheMessage as jest.Mock).mock.calls
+      .map(([, message]) => message)
+      .filter((m) => m.type === MessageType.diagnostics);
+
+  const EXPECTED_SEGMENTS = [
+    { text: "Help\n  • " },
+    {
+      text: "We apply h",
+      edit: { start: 9, end: 17, newText: "We apply h", oldText: "line one" },
+    },
+  ];
+
+  beforeEach(() => {
+    getDiagnostics.mockReturnValue([]);
+  });
+
+  it("patches in segments with offset-based edits and caches the result", async () => {
+    getDiagnostics.mockReturnValue([helpDiagnostic()]);
+    const instance = makeSegmentClient();
+    instance.resolveSegments.mockResolvedValue(new Map([[0, segmentsFor()]]));
+
+    await processDiagnostics(instance);
+
+    expect(segmentPatches(instance)).toEqual([
+      {
+        type: MessageType.diagnosticSegmentsResolved,
+        body: {
+          version: 1,
+          patches: [{ index: 0, segments: EXPECTED_SEGMENTS }],
+        },
+      },
+    ]);
+    expect(
+      cachedMessages(instance)[0].body.positionedDiagnostics[0].segments,
+    ).toEqual(EXPECTED_SEGMENTS);
+    // The base message was sent before the segments were known.
+    expect(
+      diagnosticsMessages(instance)[0].body.positionedDiagnostics[0].segments,
+    ).toBeUndefined();
+    // Segments don't need code actions.
+    expect(instance.client.sendRequest).not.toHaveBeenCalled();
+  });
+
+  it("only asks for segments of diagnostics inside input areas", async () => {
+    getDiagnostics.mockReturnValue([
+      {
+        ...helpDiagnostic(),
+        range: new Range(new Position(3, 0), new Position(3, 4)),
+      } as Diagnostic,
+      {
+        ...helpDiagnostic(),
+        range: new Range(new Position(1, 0), new Position(1, 4)),
+      } as Diagnostic,
+    ]);
+    const instance = makeSegmentClient(MULTI_AREA_DOCUMENT);
+
+    await processDiagnostics(instance);
+
+    expect(instance.resolveSegments).toHaveBeenCalledWith(
+      MULTI_AREA_DOCUMENT,
+      expect.anything(),
+      [1],
+    );
+  });
+
+  it("does not ask for segments when no diagnostic is inside an input area", async () => {
+    getDiagnostics.mockReturnValue([
+      {
+        ...helpDiagnostic(),
+        range: new Range(new Position(3, 0), new Position(3, 4)),
+      } as Diagnostic,
+    ]);
+    const instance = makeSegmentClient(MULTI_AREA_DOCUMENT);
+
+    await processDiagnostics(instance);
+
+    expect(instance.resolveSegments).not.toHaveBeenCalled();
+  });
+
+  it("keeps a suggestion whose edit reaches outside the input area as plain text", async () => {
+    getDiagnostics.mockReturnValue([helpDiagnostic()]);
+    const instance = makeSegmentClient();
+    // The input area ends at the start of line 5 (the closing ":::").
+    instance.resolveSegments.mockResolvedValue(
+      new Map([[0, segmentsFor(lspRange(1, 0, 5, 3))]]),
+    );
+
+    await processDiagnostics(instance);
+
+    // Without any suggestion left there is nothing to patch.
+    expect(segmentPatches(instance)).toEqual([]);
+  });
+
+  it("sends nothing when segments could not be resolved", async () => {
+    getDiagnostics.mockReturnValue([helpDiagnostic()]);
+    const instance = makeSegmentClient();
+    instance.resolveSegments.mockResolvedValue(undefined);
+
+    await processDiagnostics(instance);
+
+    expect(segmentPatches(instance)).toEqual([]);
+    expect(cachedMessages(instance)).toEqual([]);
+  });
+
+  it("logs and recovers when resolving segments fails", async () => {
+    getDiagnostics.mockReturnValue([helpDiagnostic()]);
+    const instance = makeSegmentClient();
+    instance.resolveSegments.mockRejectedValue(new Error("rpc failed"));
+
+    await expect(processDiagnostics(instance)).resolves.toBeUndefined();
+    expect(segmentPatches(instance)).toEqual([]);
+  });
+
+  it("drops segments when the document changed while they were resolved", async () => {
+    getDiagnostics.mockReturnValue([helpDiagnostic()]);
+    const document = { ...FAKE_DOCUMENT, version: 1 } as TextDocument;
+    const instance = makeSegmentClient(document);
+    instance.resolveSegments.mockImplementation(async () => {
+      (document as { version: number }).version = 2;
+      return new Map([[0, segmentsFor()]]);
+    });
+
+    await processDiagnostics(instance);
+
+    expect(segmentPatches(instance)).toEqual([]);
+  });
+
+  it("carries segments over to the next pass, and removes them if they are gone", async () => {
+    getDiagnostics.mockReturnValue([helpDiagnostic()]);
+    const instance = makeSegmentClient();
+    instance.resolveSegments.mockResolvedValueOnce(
+      new Map([[0, segmentsFor()]]),
+    );
+    await processDiagnostics(instance);
+
+    // The next pass: the base message already has the segments...
+    let resolveSecond!: (v: Map<number, MessageSegment[]>) => void;
+    instance.resolveSegments.mockReturnValueOnce(
+      new Promise((resolve) => (resolveSecond = resolve)),
+    );
+    const second = processDiagnostics(instance);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(
+      diagnosticsMessages(instance)[1].body.positionedDiagnostics[0].segments,
+    ).toEqual(EXPECTED_SEGMENTS);
+
+    // ...and when the server no longer has them, an empty patch removes them.
+    resolveSecond(new Map());
+    await second;
+    expect(segmentPatches(instance)[1].body.patches).toEqual([
+      { index: 0, segments: [] },
+    ]);
+    expect(
+      cachedMessages(instance)[1].body.positionedDiagnostics[0].segments,
+    ).toBeUndefined();
+  });
+
+  it("does not carry segments over when the text they replace has changed", async () => {
+    getDiagnostics.mockReturnValue([helpDiagnostic()]);
+    let text = FAKE_TEXT;
+    const document = { ...FAKE_DOCUMENT, getText: () => text } as TextDocument;
+    const instance = makeSegmentClient(document);
+    instance.resolveSegments.mockResolvedValueOnce(
+      new Map([[0, segmentsFor()]]),
+    );
+    await processDiagnostics(instance);
+
+    text = FAKE_TEXT.replace("line one", "LINE ONE");
+    instance.resolveSegments.mockResolvedValueOnce(undefined);
+    await processDiagnostics(instance);
+
+    expect(
+      diagnosticsMessages(instance)[1].body.positionedDiagnostics[0].segments,
+    ).toBeUndefined();
   });
 });

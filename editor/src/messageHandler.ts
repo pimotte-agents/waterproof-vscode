@@ -100,6 +100,11 @@ export function handleEditorMessage(
       editor.patchDiagnosticCodeActions(version, index, codeActions);
       break;
     }
+    case MessageType.diagnosticSegmentsResolved: {
+      const { version, patches } = msg.body;
+      editor.patchDiagnosticSegments(version, patches);
+      break;
+    }
     default:
       // If we reach this 'default' case, then we have encountered an unknown message type.
       console.log(`[WEBVIEW] Unrecognized message type '${msg.type}'`);
