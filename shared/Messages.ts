@@ -5,7 +5,6 @@ import {
   HistoryChange,
   ThemeStyle,
   OffsetDiagnostic,
-  OffsetCodeAction,
   OffsetMessageSegment,
 } from "@impermeable/waterproof-editor";
 import { RocqGoalAnswer, HypVisibility, PpString } from "../lib/types";
@@ -80,10 +79,6 @@ export type Message =
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   | MessageBase<MessageType.infoviewRpc, { payload: any }>
   | MessageBase<
-      MessageType.codeActionsResolved,
-      { version: number; index: number; codeActions: OffsetCodeAction[] }
-    >
-  | MessageBase<
       MessageType.diagnosticSegmentsResolved,
       {
         version: number;
@@ -126,6 +121,5 @@ export const enum MessageType {
   themeUpdate,
   viewportHint,
   infoviewRpc,
-  codeActionsResolved,
   diagnosticSegmentsResolved,
 }

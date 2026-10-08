@@ -23,7 +23,6 @@ function createEditorMock(): jest.Mocked<MessageHandlerEditor> {
     startSpinner: jest.fn(),
     stopSpinner: jest.fn(),
     updateNodeViewThemes: jest.fn(),
-    patchDiagnosticCodeActions: jest.fn(),
     patchDiagnosticSegments: jest.fn(),
   };
 }

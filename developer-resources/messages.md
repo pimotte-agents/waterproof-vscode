@@ -59,7 +59,7 @@ number // Position of the cursor (offset based) after mapping
 #### Description
 Message that contains the diagnostics in the current document which the extension received from the LSP server. Send to the editor upon receiving from the LSP server.
 
-Diagnostics may already include code actions and message segments carried over from the previous message; further code actions and segments are streamed in afterwards with `codeActionsResolved` and `diagnosticSegmentsResolved` messages, which refer to this message through its `version`.
+Diagnostics may already include message segments carried over from the previous message; further segments are streamed in afterwards with `diagnosticSegmentsResolved` messages, which refer to this message through its `version`.
 
 #### Body
 ```ts
@@ -248,28 +248,13 @@ Sent from the extension to the editor to enable/disable teacher mode in the edit
 boolean // Flag indicating whether teacher mode should be turned on or off
 ```
 
-### `codeActionsResolved`
-#### Description
-Sent by the extension to the editor to patch in the code actions for a single diagnostic after they have been resolved. Code actions are only requested by language clients that opt in (currently none), for diagnostics inside input areas. They are resolved per diagnostic, a few in parallel, and pushed to the editor as soon as each one finishes. An empty `codeActions` array removes actions that were carried over from the previous `diagnostics` message.
-
-The `index` refers to the position of the diagnostic within the `diagnostics` message for the given `version`; the editor discards patches for a version that is no longer active. Each edit carries the `oldText` it replaces, and the editor refuses to apply an edit whose `oldText` no longer matches the document.
-
-#### Body
-```ts
-{
-    version: number,                 // Document version the patched diagnostic belongs to
-    index: number,                   // Index of the diagnostic (within the last `diagnostics` message for this version) to patch
-    codeActions: OffsetCodeAction[]  // The resolved code actions for that diagnostic (may be empty)
-}
-```
-
 ### `diagnosticSegmentsResolved`
 #### Description
 Sent by the extension to the editor to patch in message segments for diagnostics after they have been resolved. A segment is a piece of the diagnostic message; a segment with an `edit` is a suggestion, which the editor shows as a link inside the message that applies the edit when clicked. Concatenating the segment texts gives the diagnostic's message.
 
 Segments are only resolved by language clients that opt in, for diagnostics inside input areas. The Lean client takes them from the "Try this" widgets in the interactive diagnostics (`Lean.Widget.getInteractiveDiagnostics`), which requires the server to be started with `hasWidgets: true`. All segments of one diagnostics message are sent in a single `diagnosticSegmentsResolved` message. An empty `segments` array removes segments that were carried over from the previous `diagnostics` message.
 
-As for `codeActionsResolved`, each `index` refers to the position of the diagnostic within the `diagnostics` message for the given `version`, patches for a version that is no longer active are discarded, and each edit carries the `oldText` it replaces. Suggestions whose edit reaches outside the input area are sent as plain text.
+Each `index` refers to the position of the diagnostic within the `diagnostics` message for the given `version`; the editor discards patches for a version that is no longer active. Each edit carries the `oldText` it replaces, and the editor refuses to apply an edit whose `oldText` no longer matches the document. Suggestions whose edit reaches outside the input area are sent as plain text.
 
 #### Body
 ```ts

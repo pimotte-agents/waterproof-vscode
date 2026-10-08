@@ -95,11 +95,6 @@ export function handleEditorMessage(
     case MessageType.themeUpdate:
       editor.updateNodeViewThemes(msg.body.theme);
       break;
-    case MessageType.codeActionsResolved: {
-      const { version, index, codeActions } = msg.body;
-      editor.patchDiagnosticCodeActions(version, index, codeActions);
-      break;
-    }
     case MessageType.diagnosticSegmentsResolved: {
       const { version, patches } = msg.body;
       editor.patchDiagnosticSegments(version, patches);

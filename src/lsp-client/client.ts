@@ -12,9 +12,6 @@ import {
   CancellationTokenSource,
 } from "vscode";
 import {
-  CodeAction,
-  CodeActionParams,
-  CodeActionRequest,
   DocumentSymbol,
   DocumentSymbolParams,
   DocumentSymbolRequest,
@@ -33,9 +30,7 @@ import {
 
 import {
   InputAreaStatus,
-  OffsetCodeAction,
   OffsetDiagnostic,
-  OffsetEdit,
   OffsetMessageSegment,
   Severity,
   WaterproofCompletion,
@@ -64,19 +59,10 @@ function vscodeSeverityToWaterproof(severity: DiagnosticSeverity): Severity {
   }
 }
 
-/**
- * Identifies a diagnostic across diagnostics passes, for carrying code actions and
- * segments over.
- */
+/** Identifies a diagnostic across diagnostics passes, for carrying segments over. */
 function diagnosticKey(d: OffsetDiagnostic): string {
   return `${d.startOffset}:${d.endOffset}:${d.message}`;
 }
-
-/** The code actions and segments resolved for a diagnostic. */
-type DiagnosticExtras = {
-  codeActions?: OffsetCodeAction[];
-  segments?: OffsetMessageSegment[];
-};
 
 function wasCanceledByServer(reason: unknown): boolean {
   return (
@@ -290,161 +276,6 @@ export abstract class LspClient<
   }
 
   /**
-   * Whether this client asks its language server for code actions to attach to diagnostics.
-   *
-   * This is opt-in: when enabled, every diagnostic inside an input area costs a request on
-   * every diagnostics update, and the resulting actions are shown to students as buttons, so
-   * a client should only enable it together with a suitable `isAllowedCodeAction` filter.
-   */
-  protected readonly requestsCodeActions: boolean = false;
-
-  /** The maximum number of code actions shown for a single diagnostic. */
-  private static readonly MAX_CODE_ACTIONS_PER_DIAGNOSTIC = 3;
-
-  /** The maximum number of code action requests in flight at once, per diagnostics pass. */
-  private static readonly MAX_CONCURRENT_CODE_ACTION_REQUESTS = 4;
-
-  /**
-   * Gets code actions for a given diagnostic, filtering out any that are not allowed by `isAllowedCodeAction`.
-   * @param document The document for which to get code actions.
-   * @param diag The diagnostic for which to get code actions.
-   * @param token Cancellation token to cancel the request.
-   * @param containingArea The range of the input area containing the diagnostic.
-   * @returns A promise resolving to the list of allowed code actions, or `undefined` if they
-   *   could not be retrieved (e.g. because the request failed or was cancelled).
-   */
-  private async resolveCodeActionsFor(
-    document: TextDocument,
-    diag: Diagnostic,
-    token: CancellationToken,
-    containingArea: Range,
-  ): Promise<OffsetCodeAction[] | undefined> {
-    const areaStart = document.offsetAt(containingArea.start);
-    const areaEnd = document.offsetAt(containingArea.end);
-
-    const c2p = this.client.code2ProtocolConverter;
-    const p2c = this.client.protocol2CodeConverter;
-
-    const params: CodeActionParams = {
-      textDocument: { uri: document.uri.toString() },
-      range: c2p.asRange(diag.range),
-      context: {
-        diagnostics: await c2p.asDiagnostics([diag]),
-      },
-    };
-
-    try {
-      // Ask the LSP for the code actions for the given diagnostic.
-      const results = await this.client.sendRequest(
-        CodeActionRequest.type,
-        params,
-        token,
-      );
-      if (!results) return [];
-
-      const text = document.getText();
-      const validActions: {
-        action: OffsetCodeAction;
-        isPreferred?: boolean;
-      }[] = [];
-
-      for (const result of results) {
-        // Actions support commands as well as edits, but we don't handle those
-        if (!("edit" in result) || !result.edit) continue;
-        // If the code action is disabled, we skip it.
-        if (result.disabled) continue;
-        // LSP specific filtering
-        if (!this.isAllowedCodeAction(result)) {
-          wpl.debug(
-            `[resolveCodeActionsFor] skipping disallowed code action "${result.title}"`,
-          );
-          continue;
-        }
-
-        const edit = await p2c.asWorkspaceEdit(result.edit);
-        const entries = edit.entries();
-
-        // Applying only part of a multi-document action could corrupt the proof.
-        if (
-          entries.some(([uri]) => uri.toString() !== document.uri.toString())
-        ) {
-          continue;
-        }
-
-        const edits: OffsetEdit[] = [];
-        for (const [, textEdits] of entries) {
-          for (const te of textEdits) {
-            const start = document.offsetAt(te.range.start);
-            const end = document.offsetAt(te.range.end);
-            edits.push({
-              start,
-              end,
-              newText: te.newText,
-              // Lets the editor (and later passes) check that the edit still applies.
-              oldText: text.slice(start, end),
-            });
-          }
-        }
-
-        if (edits.length === 0) continue;
-
-        // Reject the whole action if any single edit reaches outside the
-        // input area, since we don't want to apply edits that could corrupt
-        // the proof state with no recovery
-        if (!edits.every((e) => e.start >= areaStart && e.end <= areaEnd)) {
-          wpl.debug(
-            `[resolveCodeActionsFor] dropped "${result.title}": edit outside input area [${areaStart}, ${areaEnd}]`,
-          );
-          continue;
-        }
-
-        validActions.push({
-          action: {
-            title: result.title,
-            edits,
-          },
-          isPreferred: result.isPreferred,
-        });
-      }
-
-      // Only return preferred actions if there are any, otherwise return all valid actions.
-      const preferredActions = validActions.filter((a) => a.isPreferred);
-      const actionsToReturn =
-        preferredActions.length > 0 ? preferredActions : validActions;
-
-      return actionsToReturn.map((a) => a.action);
-    } catch (e) {
-      if (!token.isCancellationRequested) {
-        wpl.log(`[LspClient] Failed to resolve code actions: ${e}`);
-      }
-      return undefined;
-    }
-  }
-
-  /**
-   * Determines if a code action is allowed to be sent to the editor
-   * Can be overridden by other LSP clients to filter out code actions
-   * that are not relevant to the editor.
-   *
-   * @param result The code action to check
-   * @returns true if the code action is allowed, false otherwise
-   */
-  protected isAllowedCodeAction(_result: CodeAction): boolean {
-    return true;
-  }
-
-  /**
-   * Whether code actions should be requested for diagnostics: the client has to opt in
-   * (see {@linkcode requestsCodeActions}) and the server has to support them.
-   */
-  private codeActionsEnabled(): boolean {
-    return (
-      this.requestsCodeActions &&
-      !!this.client.initializeResult?.capabilities.codeActionProvider
-    );
-  }
-
-  /**
    * Whether the client resolves message segments (see {@linkcode resolveMessageSegments}).
    */
   protected readonly requestsMessageSegments: boolean = false;
@@ -473,7 +304,8 @@ export abstract class LspClient<
 
   /**
    * Converts message segments to offset-based segments. A suggestion whose edit reaches
-   * outside the input area is kept as plain text, like code actions are dropped in that case.
+   * outside the input area is kept as plain text, since we don't want to apply edits that
+   * could corrupt the proof with no recovery.
    */
   private toOffsetSegments(
     document: TextDocument,
@@ -511,7 +343,7 @@ export abstract class LspClient<
 
   /**
    * Sends the diagnostics of the active document to its editor, and then resolves and
-   * streams in the code actions and message segments for the diagnostics inside input areas.
+   * streams in the message segments for the diagnostics inside input areas.
    */
   protected async processDiagnostics(): Promise<void> {
     const document = this.activeDocument;
@@ -542,15 +374,13 @@ export abstract class LspClient<
     }));
 
     try {
-      const codeActionsEnabled = this.codeActionsEnabled();
       const segmentsEnabled = this.requestsMessageSegments;
 
-      // Only diagnostics inside an input area get code actions and segments, since we only
-      // want to apply edits inside input areas. This avoids unnecessary LSP requests.
-      const inputAreas =
-        codeActionsEnabled || segmentsEnabled
-          ? this.getInputAreas(document)
-          : undefined;
+      // Only diagnostics inside an input area get segments, since we only want to apply
+      // edits inside input areas. This avoids unnecessary LSP requests.
+      const inputAreas = segmentsEnabled
+        ? this.getInputAreas(document)
+        : undefined;
       const containingAreas = diagnostics.map((d) =>
         inputAreas?.find((area) => area.contains(d.range)),
       );
@@ -558,63 +388,38 @@ export abstract class LspClient<
         area ? [index] : [],
       );
 
-      // Carry over the code actions and segments of the previous pass for diagnostics that
-      // are still there, as long as their edits still apply to the current text. This keeps
-      // them visible across progressive diagnostics updates while they are re-resolved.
-      const previous = this.resolvedDiagnosticExtras.get(uri);
-      const current = new Map<string, DiagnosticExtras>();
-      this.resolvedDiagnosticExtras.set(uri, current);
+      // Carry over the segments of the previous pass for diagnostics that are still there,
+      // as long as their edits still apply to the current text. This keeps them visible
+      // across progressive diagnostics updates while they are re-resolved.
+      const previous = this.resolvedSegments.get(uri);
+      const current = new Map<string, OffsetMessageSegment[]>();
+      this.resolvedSegments.set(uri, current);
       const text = document.getText();
-      const stillApplies = (edits: readonly OffsetEdit[]) =>
-        edits.every(
-          (e) =>
-            e.oldText !== undefined && text.slice(e.start, e.end) === e.oldText,
+      const stillApplies = (segments: readonly OffsetMessageSegment[]) =>
+        segments.every(
+          ({ edit: e }) =>
+            !e ||
+            (e.oldText !== undefined &&
+              text.slice(e.start, e.end) === e.oldText),
         );
       if (previous && requested.length > 0) {
         for (const index of requested) {
           const d = positionedDiagnostics[index];
           const key = diagnosticKey(d);
-          const extras = previous.get(key);
-          const carriedActions = extras?.codeActions?.filter((action) =>
-            stillApplies(action.edits),
-          );
-          const carriedSegments =
-            extras?.segments &&
-            stillApplies(
-              extras.segments.flatMap((s) => (s.edit ? [s.edit] : [])),
-            )
-              ? extras.segments
-              : undefined;
-          const carried: DiagnosticExtras = {};
-          if (
-            codeActionsEnabled &&
-            carriedActions &&
-            carriedActions.length > 0
-          ) {
-            d.codeActions = carried.codeActions = carriedActions;
-          }
-          if (segmentsEnabled && carriedSegments) {
-            d.segments = carried.segments = carriedSegments;
-          }
-          if (carried.codeActions || carried.segments)
+          const carried = previous.get(key);
+          if (carried && stillApplies(carried)) {
+            d.segments = carried;
             current.set(key, carried);
+          }
         }
       }
-      const updateExtras = (index: number, update: DiagnosticExtras) => {
-        const key = diagnosticKey(positionedDiagnostics[index]);
-        const extras = { ...current.get(key), ...update };
-        if (!extras.codeActions) delete extras.codeActions;
-        if (!extras.segments) delete extras.segments;
-        if (extras.codeActions || extras.segments) current.set(key, extras);
-        else current.delete(key);
-      };
 
       wpl.debug(
         `[diag] sending ${positionedDiagnostics.length} base diagnostics, version=${docVersionAtStart}`,
       );
 
       // Send the diagnostics right away, so squiggles/messages show up without waiting
-      // on code action resolution. A copy is sent, since the entries are updated below.
+      // on segment resolution. A copy is sent, since the entries are updated below.
       this.webviewManager!.postAndCacheMessage(document, {
         type: MessageType.diagnostics,
         body: {
@@ -625,172 +430,59 @@ export abstract class LspClient<
 
       if (requested.length === 0) return;
 
-      let anyChanged = false;
-
-      const resolveAllCodeActions = async () => {
-        // Some servers (e.g. Lean's "Try this" provider) return every action on the lines a
-        // diagnostic covers, so the same action can be returned for several diagnostics. It is
-        // only shown on the narrowest requested diagnostic that overlaps its edits.
-        const ownerOf = (action: OffsetCodeAction): number | undefined => {
-          const start = Math.min(...action.edits.map((e) => e.start));
-          const end = Math.max(...action.edits.map((e) => e.end));
-          let owner: number | undefined;
-          for (const index of requested) {
-            const d = positionedDiagnostics[index];
-            if (d.startOffset > end || start > d.endOffset) continue;
-            const width = d.endOffset - d.startOffset;
-            if (
-              owner === undefined ||
-              width <
-                positionedDiagnostics[owner].endOffset -
-                  positionedDiagnostics[owner].startOffset
-            ) {
-              owner = index;
-            }
-          }
-          return owner;
-        };
-
-        const resolveOne = async (index: number) => {
-          const resolved = await this.resolveCodeActionsFor(
-            document,
-            diagnostics[index],
-            token,
-            containingAreas[index]!,
-          );
-          if (resolved === undefined || isStale()) return;
-
-          const owned = resolved.filter((action) => {
-            const owner = ownerOf(action);
-            return owner === undefined || owner === index;
-          });
-          const max = LspClient.MAX_CODE_ACTIONS_PER_DIAGNOSTIC;
-          const codeActions = owned.slice(0, max);
-          if (owned.length > max) {
-            wpl.debug(
-              `[resolveCodeActionsFor] dropped ${owned.length - max} action(s) beyond top ${max} ` +
-                `for diagnostic "${diagnostics[index].message}": ${owned
-                  .slice(max)
-                  .map((a) => `"${a.title}"`)
-                  .join(", ")}`,
-            );
-          }
-
-          const diagnostic = positionedDiagnostics[index];
-          // Nothing to report: no actions now, and none were carried over from the previous pass.
-          if (codeActions.length === 0 && diagnostic.codeActions === undefined)
-            return;
-
-          if (codeActions.length > 0) {
-            diagnostic.codeActions = codeActions;
-          } else {
-            delete diagnostic.codeActions;
-          }
-          updateExtras(index, {
-            codeActions: codeActions.length > 0 ? codeActions : undefined,
-          });
-          anyChanged = true;
-
-          wpl.debug(
-            `[diag] sending code action patch index=${index} version=${docVersionAtStart} actions=${codeActions.length}`,
-          );
-
-          this.webviewManager!.postMessage(uri, {
-            type: MessageType.codeActionsResolved,
-            body: { version: docVersionAtStart, index, codeActions },
-          });
-        };
-
-        // Resolve code actions per diagnostic, a few at a time, and push each one to the
-        // webview as soon as *it* resolves instead of waiting for all of them.
-        const queue = [...requested];
-        const worker = async () => {
-          while (queue.length > 0 && !isStale())
-            await resolveOne(queue.shift()!);
-        };
-        await Promise.all(
-          Array.from(
-            {
-              length: Math.min(
-                LspClient.MAX_CONCURRENT_CODE_ACTION_REQUESTS,
-                queue.length,
-              ),
-            },
-            worker,
-          ),
+      let resolved: Map<number, MessageSegment[]> | undefined;
+      try {
+        resolved = await this.resolveMessageSegments(
+          document,
+          diagnostics,
+          requested,
+          token,
         );
-      };
-
-      const resolveAllSegments = async () => {
-        let resolved: Map<number, MessageSegment[]> | undefined;
-        try {
-          resolved = await this.resolveMessageSegments(
-            document,
-            diagnostics,
-            requested,
-            token,
-          );
-        } catch (e) {
-          if (!token.isCancellationRequested) {
-            wpl.log(`[LspClient] Failed to resolve message segments: ${e}`);
-          }
-          return;
+      } catch (e) {
+        if (!token.isCancellationRequested) {
+          wpl.log(`[LspClient] Failed to resolve message segments: ${e}`);
         }
-        if (resolved === undefined || isStale()) return;
-
-        const patches: { index: number; segments: OffsetMessageSegment[] }[] =
-          [];
-        for (const index of requested) {
-          const diagnostic = positionedDiagnostics[index];
-          const raw = resolved.get(index);
-          const segments = raw
-            ? this.toOffsetSegments(
-                document,
-                text,
-                raw,
-                containingAreas[index]!,
-              )
-            : undefined;
-          const hasSuggestion = segments?.some((s) => s.edit) ?? false;
-          // Nothing to report: no segments now, and none were carried over.
-          if (!hasSuggestion && diagnostic.segments === undefined) continue;
-
-          if (hasSuggestion) {
-            diagnostic.segments = segments;
-          } else {
-            delete diagnostic.segments;
-          }
-          updateExtras(index, {
-            segments: hasSuggestion ? segments : undefined,
-          });
-          patches.push({ index, segments: hasSuggestion ? segments! : [] });
-        }
-        if (patches.length === 0) return;
-        anyChanged = true;
-
-        wpl.debug(
-          `[diag] sending segment patches indices=${patches.map((p) => p.index).join(",")} version=${docVersionAtStart}`,
-        );
-
-        this.webviewManager!.postMessage(uri, {
-          type: MessageType.diagnosticSegmentsResolved,
-          body: { version: docVersionAtStart, patches },
-        });
-      };
-
-      await Promise.all([
-        codeActionsEnabled ? resolveAllCodeActions() : undefined,
-        segmentsEnabled ? resolveAllSegments() : undefined,
-      ]);
-
-      // Cache the final message with all code actions and segments so that
-      // they remain when we switch tabs.
-      if (anyChanged && !isStale()) {
-        this.webviewManager!.cacheMessage(document, {
-          type: MessageType.diagnostics,
-          body: { positionedDiagnostics, version: docVersionAtStart },
-        });
+        return;
       }
+      if (resolved === undefined || isStale()) return;
+
+      const patches: { index: number; segments: OffsetMessageSegment[] }[] = [];
+      for (const index of requested) {
+        const diagnostic = positionedDiagnostics[index];
+        const key = diagnosticKey(diagnostic);
+        const raw = resolved.get(index);
+        const segments = raw
+          ? this.toOffsetSegments(document, text, raw, containingAreas[index]!)
+          : undefined;
+        const hasSuggestion = segments?.some((s) => s.edit) ?? false;
+        // Nothing to report: no segments now, and none were carried over.
+        if (!hasSuggestion && diagnostic.segments === undefined) continue;
+
+        if (hasSuggestion) {
+          diagnostic.segments = segments;
+          current.set(key, segments!);
+        } else {
+          delete diagnostic.segments;
+          current.delete(key);
+        }
+        patches.push({ index, segments: hasSuggestion ? segments! : [] });
+      }
+      if (patches.length === 0) return;
+
+      wpl.debug(
+        `[diag] sending segment patches indices=${patches.map((p) => p.index).join(",")} version=${docVersionAtStart}`,
+      );
+
+      this.webviewManager!.postMessage(uri, {
+        type: MessageType.diagnosticSegmentsResolved,
+        body: { version: docVersionAtStart, patches },
+      });
+
+      // Cache the final message with all segments so that they remain when we switch tabs.
+      this.webviewManager!.cacheMessage(document, {
+        type: MessageType.diagnostics,
+        body: { positionedDiagnostics, version: docVersionAtStart },
+      });
     } finally {
       if (this.diagnosticsCts.get(uri) === cts) {
         this.diagnosticsCts.delete(uri);
@@ -837,18 +529,18 @@ export abstract class LspClient<
 
   /**
    * Tracks, per document URI, the most recent in-flight `processDiagnostics` pass so it can
-   * be cancelled when a newer one supersedes it (e.g. the user keeps typing while code
-   * actions are still being resolved against the previous diagnostics snapshot).
+   * be cancelled when a newer one supersedes it (e.g. the user keeps typing while
+   * segments are still being resolved against the previous diagnostics snapshot).
    */
   private readonly diagnosticsCts = new Map<string, CancellationTokenSource>();
 
   /**
-   * Per document URI, the code actions and segments of the latest diagnostics pass, keyed by
+   * Per document URI, the segments of the latest diagnostics pass, keyed by
    * {@linkcode diagnosticKey}. Used to carry them over to the next pass.
    */
-  private readonly resolvedDiagnosticExtras = new Map<
+  private readonly resolvedSegments = new Map<
     string,
-    Map<string, DiagnosticExtras>
+    Map<string, OffsetMessageSegment[]>
   >();
 
   protected async computeInputAreaStatus(
@@ -1043,7 +735,7 @@ export abstract class LspClient<
       cts.dispose();
     }
     this.diagnosticsCts.clear();
-    this.resolvedDiagnosticExtras.clear();
+    this.resolvedSegments.clear();
     this.fileProgressComponents.forEach((c) => c.dispose());
     this.disposables.forEach((d) => d.dispose());
     return this.client.dispose(timeout);
