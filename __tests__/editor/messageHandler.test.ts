@@ -2,6 +2,7 @@ import { Message, MessageType } from "../../shared";
 import { handleEditorMessage } from "../../editor/src/messageHandler";
 import { MessageHandlerEditor } from "@impermeable/waterproof-editor";
 import { describe, expect, it, jest } from "@jest/globals";
+import { EditorDocumentSync } from "../../editor/src/documentSync";
 
 function createEditorMock(): jest.Mocked<MessageHandlerEditor> {
   return {
@@ -15,7 +16,6 @@ function createEditorMock(): jest.Mocked<MessageHandlerEditor> {
     setShowMenuItems: jest.fn(),
     handleHistoryChange: jest.fn(),
     setTeacherMode: jest.fn(),
-    refreshDocument: jest.fn(),
     removeBusyIndicators: jest.fn(),
     reportProgress: jest.fn(),
     setBusyIndicator: jest.fn(),
@@ -27,6 +27,39 @@ function createEditorMock(): jest.Mocked<MessageHandlerEditor> {
 }
 
 describe("handleEditorMessage", () => {
+  describe("sync", () => {
+    const init = (webview: string): Message => ({
+      type: MessageType.init,
+      body: { value: "x", version: 3, epoch: 1, webview },
+    });
+
+    it("shows content addressed to this webview", () => {
+      const editor = createEditorMock();
+      const sync = new EditorDocumentSync(jest.fn(), "a");
+      handleEditorMessage(editor, init("a"), sync);
+      expect(editor.init).toHaveBeenCalledWith("x", 3);
+    });
+
+    it("ignores content for an earlier instance of the webview", () => {
+      const editor = createEditorMock();
+      const sync = new EditorDocumentSync(jest.fn(), "b");
+      handleEditorMessage(editor, init("a"), sync);
+      expect(editor.init).not.toHaveBeenCalled();
+    });
+
+    it("requests the document when it is out of sync", () => {
+      const editor = createEditorMock();
+      const post = jest.fn();
+      const sync = new EditorDocumentSync(post, "a");
+      handleEditorMessage(editor, init("a"), sync);
+      handleEditorMessage(editor, { type: MessageType.outOfSync }, sync);
+      expect(post).toHaveBeenCalledWith({
+        type: MessageType.requestDocument,
+        body: { epoch: 1 },
+      });
+    });
+  });
+
   describe("insert", () => {
     it("calls handleSnippet for tactics type, not insertSymbol", () => {
       const editor = createEditorMock();

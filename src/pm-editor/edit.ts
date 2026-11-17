@@ -39,10 +39,13 @@ export class SequentialEditor {
     const edit = new WorkspaceEdit();
     op(edit);
     workspace.applyEdit(edit).then(
-      () => {
+      () => this.applyNext(),
+      (reason) => {
+        console.log("REJECTED EDIT", reason);
+        // Continue with the queue; otherwise no edit would ever be applied again. The editor
+        // is brought in line with the document afterwards, like after any other change.
         this.applyNext();
       },
-      (reason) => console.log("REJECTED EDIT", reason),
     );
   }
 

@@ -1,13 +1,19 @@
 import type { MessageHandlerEditor } from "@impermeable/waterproof-editor";
 import { Message, MessageType, ServerStatus } from "../../shared";
+import type { EditorDocumentSync } from "./documentSync";
 
 export function handleEditorMessage(
   editor: MessageHandlerEditor,
   msg: Message,
+  sync?: EditorDocumentSync,
 ): void {
   switch (msg.type) {
     case MessageType.init:
+      if (sync && !sync.acceptInit(msg.body)) break;
       editor.init(msg.body.value, msg.body.version);
+      break;
+    case MessageType.outOfSync:
+      sync?.outOfSync();
       break;
     case MessageType.insert: {
       // Insert symbol message, retrieve the symbol from the message.
@@ -24,9 +30,6 @@ export function handleEditorMessage(
       }
       break;
     }
-    case MessageType.refreshDocument:
-      editor.refreshDocument(msg.body.value, msg.body.version);
-      break;
     case MessageType.replaceRange: {
       const { start, end, text } = msg.body;
       editor.replaceRange(start, end, text);
