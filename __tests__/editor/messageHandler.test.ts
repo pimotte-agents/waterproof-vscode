@@ -6,6 +6,7 @@ import { describe, expect, it, jest } from "@jest/globals";
 function createEditorMock(): jest.Mocked<MessageHandlerEditor> {
   return {
     init: jest.fn(),
+    freeze: jest.fn(),
     insertSymbol: jest.fn(),
     handleSnippet: jest.fn(),
     replaceRange: jest.fn(),
@@ -27,6 +28,65 @@ function createEditorMock(): jest.Mocked<MessageHandlerEditor> {
 }
 
 describe("handleEditorMessage", () => {
+  describe("sync", () => {
+    it("rebuilds the editor on init and remembers the epoch", () => {
+      const editor = createEditorMock();
+      const sync = { epoch: 0, webview: "a", reply: jest.fn() };
+      handleEditorMessage(
+        editor,
+        {
+          type: MessageType.init,
+          body: { value: "x", version: 3, epoch: 2, webview: "a" },
+        },
+        sync,
+      );
+      expect(editor.init).toHaveBeenCalledWith("x", 3, true);
+      expect(sync.epoch).toBe(2);
+    });
+
+    it("ignores an init meant for an earlier instance of the webview", () => {
+      const editor = createEditorMock();
+      const sync = { epoch: 0, webview: "b", reply: jest.fn() };
+      handleEditorMessage(
+        editor,
+        {
+          type: MessageType.init,
+          body: { value: "x", version: 3, epoch: 2, webview: "a" },
+        },
+        sync,
+      );
+      expect(editor.init).not.toHaveBeenCalled();
+      expect(sync.epoch).toBe(0);
+    });
+
+    it("freezes and answers a freeze for the current content", () => {
+      const editor = createEditorMock();
+      const sync = { epoch: 2, webview: "a", reply: jest.fn() };
+      handleEditorMessage(
+        editor,
+        { type: MessageType.freeze, body: { epoch: 2 } },
+        sync,
+      );
+      expect(editor.freeze).toHaveBeenCalled();
+      expect(sync.reply).toHaveBeenCalledWith({
+        type: MessageType.frozen,
+        body: { epoch: 2 },
+      });
+    });
+
+    it("ignores a freeze for content that was replaced already", () => {
+      const editor = createEditorMock();
+      const sync = { epoch: 3, webview: "a", reply: jest.fn() };
+      handleEditorMessage(
+        editor,
+        { type: MessageType.freeze, body: { epoch: 2 } },
+        sync,
+      );
+      expect(editor.freeze).not.toHaveBeenCalled();
+      expect(sync.reply).not.toHaveBeenCalled();
+    });
+  });
+
   describe("insert", () => {
     it("calls handleSnippet for tactics type, not insertSymbol", () => {
       const editor = createEditorMock();

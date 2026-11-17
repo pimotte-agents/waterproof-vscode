@@ -1,13 +1,38 @@
 import type { MessageHandlerEditor } from "@impermeable/waterproof-editor";
 import { Message, MessageType, ServerStatus } from "../../shared";
 
+/** What the editor keeps to stay in sync with the document in the extension. */
+export interface EditorSyncState {
+  /** The epoch of the content the editor shows, from the last `init`. */
+  epoch: number;
+  /** The id of this webview instance, sent in `ready`. */
+  webview: string;
+  /** Sends a message to the extension. */
+  reply: (msg: Message) => void;
+}
+
 export function handleEditorMessage(
   editor: MessageHandlerEditor,
   msg: Message,
+  sync?: EditorSyncState,
 ): void {
   switch (msg.type) {
     case MessageType.init:
-      editor.init(msg.body.value, msg.body.version);
+      // Content for an earlier instance of this webview; the extension sends its own once it
+      // has received this instance's `ready`.
+      if (sync && msg.body.webview !== sync.webview) break;
+      if (sync) sync.epoch = msg.body.epoch;
+      // Always rebuild: the extension only sends `init` when the content must be replaced.
+      editor.init(msg.body.value, msg.body.version, true);
+      break;
+    case MessageType.freeze:
+      // A freeze for older content is outdated: that content has been replaced already.
+      if (sync && msg.body.epoch !== sync.epoch) break;
+      editor.freeze();
+      sync?.reply({
+        type: MessageType.frozen,
+        body: { epoch: msg.body.epoch },
+      });
       break;
     case MessageType.insert: {
       // Insert symbol message, retrieve the symbol from the message.
@@ -24,9 +49,6 @@ export function handleEditorMessage(
       }
       break;
     }
-    case MessageType.refreshDocument:
-      editor.refreshDocument(msg.body.value, msg.body.version);
-      break;
     case MessageType.replaceRange: {
       const { start, end, text } = msg.body;
       editor.replaceRange(start, end, text);

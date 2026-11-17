@@ -1,4 +1,5 @@
 import {
+  ConfigurationScope,
   env,
   extensions,
   ExtensionContext,
@@ -129,29 +130,49 @@ export function excludeRocqFileTypes() {
   }
 }
 
+/** Settings with which VS Code changes the text of a document when saving it. */
+const TEXT_CHANGING_SAVE_SETTINGS = [
+  "files.trimTrailingWhitespace",
+  "files.trimFinalNewlines",
+  "files.insertFinalNewline",
+  "editor.formatOnSave",
+] as const;
+
+/** The combination of settings that was last warned about, to avoid repeating the warning. */
+let lastWarnedSaveSettings = "";
+
 /**
- * Checks whether the user has enabled the setting `trimTrailingWhitespace`, and warns the
- * user in that case.
+ * Warns the user when settings that change the document on save are enabled for `scope`.
+ *
+ * The Waterproof editor is the only writer of its document; when saving changes the document,
+ * the editor reloads it and loses its undo history. Waterproof turns these settings off for its
+ * languages by default (see `configurationDefaults` in `package.json`), so this only warns when
+ * the user enabled them for these languages, or for languages Waterproof does not configure.
+ * The warning is shown again only when the combination of enabled settings changes.
  */
-export function checkTrimmingWhitespace() {
-  const config = workspace.getConfiguration("files");
-  const isTrimTrailingWhitespaceEnabled = config.get<boolean>(
-    "trimTrailingWhitespace",
-  );
-  if (isTrimTrailingWhitespaceEnabled) {
-    window
-      .showWarningMessage(
-        "The setting `Trim Trailing Whitespace` is enabled. This may cause unexpected behaviour in Waterproof, and we thus recommend you to turn it off.",
-        "Open Settings",
-        "Dismiss",
-      )
-      .then((selection) => {
-        if (selection === "Open Settings") {
-          commands.executeCommand(
-            "workbench.action.openSettings",
-            "Trim Trailing Whitespace",
-          );
-        }
-      });
-  }
+export function checkTextChangingSaveSettings(scope: ConfigurationScope) {
+  const enabled = TEXT_CHANGING_SAVE_SETTINGS.filter((setting) => {
+    const [section, key] = setting.split(".");
+    return workspace.getConfiguration(section, scope).get<boolean>(key, false);
+  });
+  const combination = enabled.join(",");
+  if (combination === lastWarnedSaveSettings) return;
+  lastWarnedSaveSettings = combination;
+  if (enabled.length === 0) return;
+
+  const names = enabled.map((setting) => `\`${setting}\``).join(", ");
+  window
+    .showWarningMessage(
+      `The following settings change the document when saving: ${names}. This makes the Waterproof editor reload the document, and we thus recommend you to turn them off.`,
+      "Open Settings",
+      "Dismiss",
+    )
+    .then((selection) => {
+      if (selection === "Open Settings") {
+        commands.executeCommand(
+          "workbench.action.openSettings",
+          enabled.map((setting) => `@id:${setting}`).join(" "),
+        );
+      }
+    });
 }

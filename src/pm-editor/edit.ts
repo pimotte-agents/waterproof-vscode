@@ -10,6 +10,7 @@ export class SequentialEditor {
   private inProgress = false;
   private readonly queue: EditOperation[] = [];
   private finishListener?: () => void;
+  private failureListener?: () => void;
 
   /**
    * Whether the queue contains pending operations or there is an ongoing workspace edit.
@@ -39,10 +40,16 @@ export class SequentialEditor {
     const edit = new WorkspaceEdit();
     op(edit);
     workspace.applyEdit(edit).then(
-      () => {
+      (applied) => {
+        if (!applied) this.failureListener?.();
         this.applyNext();
       },
-      (reason) => console.log("REJECTED EDIT", reason),
+      (reason) => {
+        console.log("REJECTED EDIT", reason);
+        this.failureListener?.();
+        // Continue with the queue; otherwise no edit would ever be applied again.
+        this.applyNext();
+      },
     );
   }
 
@@ -64,5 +71,12 @@ export class SequentialEditor {
    */
   onFinish(listener: () => void) {
     this.finishListener = listener;
+  }
+
+  /**
+   * Registers a handler that is called whenever VS Code does not apply an operation.
+   */
+  onFailure(listener: () => void) {
+    this.failureListener = listener;
   }
 }
