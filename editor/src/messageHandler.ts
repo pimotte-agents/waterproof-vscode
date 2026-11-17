@@ -22,8 +22,7 @@ export function handleEditorMessage(
       // has received this instance's `ready`.
       if (sync && msg.body.webview !== sync.webview) break;
       if (sync) sync.epoch = msg.body.epoch;
-      // Always rebuild: the extension only sends `init` when the content must be replaced.
-      editor.init(msg.body.value, msg.body.version, true);
+      editor.init(msg.body.value, msg.body.version);
       break;
     case MessageType.freeze:
       // A freeze for older content is outdated: that content has been replaced already.

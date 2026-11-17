@@ -16,7 +16,6 @@ function createEditorMock(): jest.Mocked<MessageHandlerEditor> {
     setShowMenuItems: jest.fn(),
     handleHistoryChange: jest.fn(),
     setTeacherMode: jest.fn(),
-    refreshDocument: jest.fn(),
     removeBusyIndicators: jest.fn(),
     reportProgress: jest.fn(),
     setBusyIndicator: jest.fn(),
@@ -40,7 +39,7 @@ describe("handleEditorMessage", () => {
         },
         sync,
       );
-      expect(editor.init).toHaveBeenCalledWith("x", 3, true);
+      expect(editor.init).toHaveBeenCalledWith("x", 3);
       expect(sync.epoch).toBe(2);
     });
 
